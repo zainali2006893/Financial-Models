@@ -64,14 +64,15 @@ for t in TICKERS:
     })
 
 df = pd.DataFrame(rows).dropna(subset=["ev_sales", "sales_qoq", "oper_margin"])
+df["log_ev_sales"] = np.log(df["ev_sales"]) # log transform so that EV/sales are positive   
 print(f"Tickers scraped: {len(df)}")
 
 # OLS regression: EV/Sales ~ sales_qoq + oper_margin
 X = np.column_stack([np.ones(len(df)), df["sales_qoq"], df["oper_margin"]])
-y = df["ev_sales"].values
+y = df["log_ev_sales"].values
 coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
 
-df["predicted"] = X @ coeffs
+df["predicted"] = np.exp(X @ coeffs)
 df["residual"] = df["ev_sales"] - df["predicted"]
 r2 = 1 - ((df["ev_sales"] - df["predicted"]) ** 2).sum() / ((df["ev_sales"] - df["ev_sales"].mean()) ** 2).sum()
 
