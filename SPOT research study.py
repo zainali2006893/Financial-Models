@@ -64,6 +64,11 @@ for t in TICKERS:
     })
 
 df = pd.DataFrame(rows).dropna(subset=["ev_sales", "sales_qoq", "oper_margin"])
+
+lower = df["ev_sales"].quantile(0.05)
+upper = df["ev_sales"].quantile(0.95)
+df["ev_sales"] = df["ev_sales"].clip(lower, upper) # clip outliers for better regression fit
+
 df["log_ev_sales"] = np.log(df["ev_sales"]) # log transform so that EV/sales are positive   
 print(f"Tickers scraped: {len(df)}")
 
