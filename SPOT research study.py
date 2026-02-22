@@ -6,18 +6,27 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from bs4 import BeautifulSoup
 
-TICKERS = [
-    "SPOT","NFLX","GOOGL","META","AAPL","AMZN","MSFT","DIS","WBD","PARA",
-    "CMCSA","ROKU","SNAP","PINS","RDDT","MTCH","BMBL","GRND","RBLX","U",
-    "EA","TTWO","DKNG","PENN","FLUT","DUOL","COUR","UDMY","CHGG","TWOU",
-    "PTON","UBER","LYFT","DASH","ABNB","BKNG","EXPE","TRIP","Z","RDFN",
-    "COMP","CSGP","OPEN","ETSY","EBAY","TDUP","REAL","SHOP","BIGC","GDDY",
-    "WIX","CPNG","SE","MELI","SQ","PYPL","HOOD","COIN","SOFI","AFRM",
-    "TOST","LSPD","FOUR","DBX","BOX","CRM","ZM","RNG","FIVN","TWLO",
-    "ADBE","DOCU","MNDY","ASAN","TEAM","GTLB","NOW","WDAY","HUBS","DDOG",
-    "SNOW","NET","MDB","ESTC","CFLT","CRWD","ZS","OKTA","YELP","IAC",
-    "ANGI","KIND","EB","FVRR","UPWK","ZIP","VMEO",
-]
+SECTORS = {
+    "SaaS": [
+        "CRM","NOW","WDAY","HUBS","DDOG","SNOW","NET","MDB","ESTC","CFLT",
+        "CRWD","ZS","OKTA","DOCU","MNDY","ASAN","TEAM","GTLB","ZM","RNG",
+        "FIVN","TWLO","DBX","BOX",
+    ],
+    "Consumer Internet": [
+        "SPOT","NFLX","DIS","WBD","PARA","CMCSA","RDDT","SNAP","PINS","MTCH",
+        "BMBL","GRND","RBLX","DUOL","COUR","UDMY","CHGG","TWOU","YELP","IAC",
+        "ANGI","VMEO","ROKU","KIND","EB","FVRR","UPWK","PTON",
+    ],
+    "Fintech": [
+        "SQ","PYPL","HOOD","COIN","SOFI","AFRM","TOST","LSPD","FOUR",
+        "DKNG","PENN","FLUT","ZIP",
+    ],
+    "E-commerce": [
+        "SHOP","ETSY","EBAY","MELI","CPNG","SE","TDUP","REAL","BIGC","WIX",
+        "GDDY","OPEN","COMP","CSGP","RDFN","Z","BKNG","EXPE","TRIP","ABNB",
+        "DASH","UBER","LYFT","AMZN","GOOGL","META","MSFT","AAPL","EA","TTWO",
+    ],
+}
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
 
@@ -42,64 +51,98 @@ def parse_pct(val):
         return float("nan")
 
 
+def run_regression(df):
+    X = np.column_stack([np.ones(len(df)), df["sales_qoq"], df["oper_margin"]])
+    y = df["log_ev_sales"].values
+    coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+    df["predicted"] = np.exp(X @ coeffs)
+    df["residual"] = df["ev_sales"] - df["predicted"]
+    r2 = 1 - ((df["log_ev_sales"] - np.log(df["predicted"])) ** 2).sum() / ((df["log_ev_sales"] - df["log_ev_sales"].mean()) ** 2).sum()
+    return df, coeffs, r2
+
+
+# scrape all tickers
 rows = []
-for t in TICKERS:
-    snap = scrape_finviz(t)
-    if not snap:
-        continue
-    ev, growth, margin, profit = (
-        snap.get("EV/Sales", "-"),
-        snap.get("Sales Q/Q", "-"),
-        snap.get("Oper. Margin", "-"),
-        snap.get("Profit Margin", "-"),
-    )
-    if "-" in (ev, growth, margin):
-        continue
-    rows.append({
-        "ticker":        t,
-        "ev_sales":      float(ev),
-        "sales_qoq":     parse_pct(growth),
-        "oper_margin":   parse_pct(margin),
-        "profit_margin": parse_pct(profit),
-    })
+for sector, tickers in SECTORS.items():
+    print(f"Scraping {sector}...")
+    for t in tickers:
+        snap = scrape_finviz(t)
+        if not snap:
+            continue
+        ev, growth, margin, profit = (
+            snap.get("EV/Sales", "-"),
+            snap.get("Sales Q/Q", "-"),
+            snap.get("Oper. Margin", "-"),
+            snap.get("Profit Margin", "-"),
+        )
+        if "-" in (ev, growth, margin):
+            continue
+        rows.append({
+            "ticker":        t,
+            "sector":        sector,
+            "ev_sales":      float(ev),
+            "sales_qoq":     parse_pct(growth),
+            "oper_margin":   parse_pct(margin),
+            "profit_margin": parse_pct(profit),
+        })
 
-df = pd.DataFrame(rows).dropna(subset=["ev_sales", "sales_qoq", "oper_margin"])
+df_all = pd.DataFrame(rows).dropna(subset=["ev_sales", "sales_qoq", "oper_margin"])
+print(f"\nTotal tickers scraped: {len(df_all)}")
 
-lower = df["ev_sales"].quantile(0.05)
-upper = df["ev_sales"].quantile(0.95)
-df["ev_sales"] = df["ev_sales"].clip(lower, upper) # clip outliers for better regression fit
+# winsorise and log transform per sector
+processed = []
+for sector, group in df_all.groupby("sector"):
+    lower = group["ev_sales"].quantile(0.05)
+    upper = group["ev_sales"].quantile(0.95)
+    group = group.copy()
+    group["ev_sales"] = group["ev_sales"].clip(lower, upper)
+    group["log_ev_sales"] = np.log(group["ev_sales"])
+    processed.append(group)
 
-df["log_ev_sales"] = np.log(df["ev_sales"]) # log transform so that EV/sales are positive   
-print(f"Tickers scraped: {len(df)}")
+df_all = pd.concat(processed).reset_index(drop=True)
 
-# OLS regression: EV/Sales ~ sales_qoq + oper_margin
-X = np.column_stack([np.ones(len(df)), df["sales_qoq"], df["oper_margin"]])
-y = df["log_ev_sales"].values
-coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+# run regression per sector, plot each
+all_residuals = []
+fig_list = []
 
-df["predicted"] = np.exp(X @ coeffs)
-df["residual"] = df["ev_sales"] - df["predicted"]
-r2 = 1 - ((df["ev_sales"] - df["predicted"]) ** 2).sum() / ((df["ev_sales"] - df["ev_sales"].mean()) ** 2).sum()
+for sector, group in df_all.groupby("sector"):
+    group = group.copy()
+    group, coeffs, r2 = run_regression(group)
+    all_residuals.append(group)
 
-print(f"\nR²: {r2:.3f}")
-print(f"Intercept: {coeffs[0]:.3f} | Sales Q/Q: {coeffs[1]:.3f} | Oper. Margin: {coeffs[2]:.3f}")
-print("\nCheapest vs model:")
-print(df.nsmallest(5, "residual")[["ticker", "ev_sales", "predicted", "residual"]].to_string(index=False))
-print("\nRichest vs model:")
-print(df.nlargest(5, "residual")[["ticker", "ev_sales", "predicted", "residual"]].to_string(index=False))
+    print(f"\n=== {sector} ===")
+    print(f"R²: {r2:.3f} | Intercept: {coeffs[0]:.3f} | Sales Q/Q: {coeffs[1]:.3f} | Oper. Margin: {coeffs[2]:.3f}")
+    print(f"Tickers: {len(group)}")
 
-fig, ax = plt.subplots(figsize=(11, 7))
-ax.scatter(df["sales_qoq"], df["ev_sales"], alpha=0.6)
-for _, row in df.iterrows():
-    ax.annotate(row["ticker"], (row["sales_qoq"], row["ev_sales"]), fontsize=7, va="bottom")
+    fig, ax = plt.subplots(figsize=(11, 7))
+    ax.scatter(group["sales_qoq"], group["ev_sales"], alpha=0.6)
+    for _, row in group.iterrows():
+        ax.annotate(row["ticker"], (row["sales_qoq"], row["ev_sales"]), fontsize=7, va="bottom")
 
-x_range = np.linspace(df["sales_qoq"].min(), df["sales_qoq"].max(), 100)
-ax.plot(x_range, coeffs[0] + coeffs[1] * x_range + coeffs[2] * df["oper_margin"].mean(),
-        color="red", linewidth=1.5, label=f"Regression (R²={r2:.2f})")
+    x_range = np.linspace(group["sales_qoq"].min(), group["sales_qoq"].max(), 100)
+    ax.plot(x_range, np.exp(coeffs[0] + coeffs[1] * x_range + coeffs[2] * group["oper_margin"].mean()),
+            color="red", linewidth=1.5, label=f"Regression (R²={r2:.2f})")
 
-ax.set_xlabel("Sales Q/Q (%)")
-ax.set_ylabel("EV/Sales")
-ax.set_title("Platform Peers: EV/Sales vs Revenue Growth")
-ax.legend()
-plt.tight_layout()
-plt.savefig("spot_comps.png", dpi=150)
+    ax.set_xlabel("Sales Q/Q (%)")
+    ax.set_ylabel("EV/Sales")
+    ax.set_title(f"{sector}: EV/Sales vs Revenue Growth")
+    ax.legend()
+    plt.tight_layout()
+    filename = f"spot_comps_{sector.lower().replace(' ', '_')}.png"
+    plt.savefig(filename, dpi=150)
+    print(f"Chart saved: {filename}")
+
+# combined summary table
+df_combined = pd.concat(all_residuals).reset_index(drop=True)
+
+print("\n=== TOP 5 RICHEST ACROSS ALL SECTORS ===")
+print(df_combined.nlargest(5, "residual")[["ticker", "sector", "ev_sales", "predicted", "residual"]].to_string(index=False))
+
+print("\n=== TOP 5 CHEAPEST ACROSS ALL SECTORS ===")
+print(df_combined.nsmallest(5, "residual")[["ticker", "sector", "ev_sales", "predicted", "residual"]].to_string(index=False))
+
+# where does SPOT sit
+spot = df_combined[df_combined["ticker"] == "SPOT"]
+if not spot.empty:
+    print("\n=== SPOT ===")
+    print(spot[["ticker", "sector", "ev_sales", "predicted", "residual"]].to_string(index=False))
